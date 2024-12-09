@@ -1,178 +1,220 @@
-import os
+import json
 import time
-import threading
-import tkinter as tk
-from tkinter import filedialog, scrolledtext, StringVar
+import pyautogui
 from pynput import mouse, keyboard
+import ttkbootstrap as ttk
+from pathlib import Path
+from tkinter import filedialog
+import datetime
+import os
 
 # 全域變數
-recorded_actions = []
-is_recording = False
-is_paused = False
-recording_start_time = None
-recordings_folder = "recordings"
+actions = []
+recording = False
+paused = False
+current_filename = ""
+mouse_listener = None
+keyboard_listener = None
 
-# 確保音檔資料夾存在
-if not os.path.exists(recordings_folder):
-    os.makedirs(recordings_folder)
+# 儲存錄製的操作
+def save_actions():
+    global current_filename
+    if actions:  # 確保有動作資料
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M")
+        current_filename = f"{timestamp}.json"
+        with open(current_filename, "w", encoding="utf-8") as f:
+            json.dump(actions, f, ensure_ascii=False, indent=4)
 
-# 錄製邏輯
-def start_recording():
-    global is_recording, recorded_actions, recording_start_time, is_paused
-    is_recording = True
-    is_paused = False
-    recorded_actions = []
-    recording_start_time = time.time()
-    log_code("開始錄製。\n")
+# 載入已保存的操作
+def load_actions(filename):
+    if Path(filename).exists():
+        with open(filename, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
-def pause_recording():
-    global is_paused
-    if is_recording:
-        is_paused = not is_paused
-        status = "暫停" if is_paused else "繼續"
-        log_code(f"錄製 {status}。\n")
+# 更新動作代碼到窗框 (簡化顯示)
+def update_actions_display(action):
+    simplified_action = ""
+    if action["type"] == "click":
+        simplified_action = f"[click] X: {action['x']} Y: {action['y']}"
+    elif action["type"] == "move":
+        simplified_action = f"[move] X: {action['x']} Y: {action['y']}"
+    elif action["type"] == "scroll":
+        simplified_action = f"[scroll] DX: {action['dx']} DY: {action['dy']}"
+    elif action["type"] in ["keydown", "keyup"]:
+        simplified_action = f"[{action['type']}] Key: {action['key']}"
+    actions_display.insert("end", f"{simplified_action}\n")
+    actions_display.see("end")  # 滾動到最新
 
-def stop_recording():
-    global is_recording, is_paused
-    is_recording = False
-    is_paused = False
-    log_code("錄製停止。\n")
-
-def save_recording():
-    if not recorded_actions:
-        log_code("沒有錄製可供保存。\n")
-        return
-    file_path = os.path.join(recordings_folder, f"recording_{int(time.time())}.txt")
-    with open(file_path, "w") as f:
-        for action in recorded_actions:
-            f.write(f"{action}\n")
-    log_code(f"錄製已保存到 {file_path}\n")
-    update_script_list()
-
-def log_code(message):
-    code_display.insert(tk.END, message)
-    code_display.see(tk.END)
-
-def update_script_list():
-    # 更新當前腳本的下拉選單
-    files = os.listdir(recordings_folder)
-    script_list.set('')
-    script_menu['values'] = [f for f in files if f.endswith('.txt')]
-    if script_menu['values']:
-        script_list.set(script_menu['values'][-1])  # 設置為最後一個檔案
-
-def execute_recording():
-    file_path = script_list.get()  # 使用選擇的文件
-    if not file_path:
-        log_code("請選擇一個檔案來執行。\n")
-        return
-    full_path = os.path.join(recordings_folder, file_path)
-    with open(full_path, "r") as f:
-        for line in f:
-            action = eval(line.strip())
-            action_type, action_detail, *args = action
-            
-            if action_type == '鍵盤':
-                if action_detail == '按下':
-                    keyboard.Controller().press(args[0])
-                elif action_detail == '放開':
-                    keyboard.Controller().release(args[0])
-            elif action_type == '滑鼠':
-                if action_detail == '點擊':
-                    x, y, button_name, pressed = args[0]
-                    button = mouse.Button.left if button_name == 'left' else mouse.Button.right
-                    if pressed:
-                        mouse.Controller().click(button, 1)
-                elif action_detail == '移動':
-                    x, y = args[0]
-                    mouse.Controller().position = (x, y)
-                elif action_detail == '滾動':
-                    x, y, dx, dy = args[0]
-                    mouse.Controller().scroll(dx, dy)
-
-# 事件監控
-def on_press(key):
-    global recorded_actions, is_recording, is_paused
-    if is_recording and not is_paused:
-        try:
-            recorded_actions.append(('鍵盤', '按下', key.char, time.time() - recording_start_time))
-        except AttributeError:
-            recorded_actions.append(('鍵盤', '按下', str(key), time.time() - recording_start_time))
-
-def on_release(key):
-    global recorded_actions, is_recording, is_paused
-    if is_recording and not is_paused:
-        try:
-            recorded_actions.append(('鍵盤', '放開', key.char, time.time() - recording_start_time))
-        except AttributeError:
-            recorded_actions.append(('鍵盤', '放開', str(key), time.time() - recording_start_time))
+# 錄製滑鼠和鍵盤事件
+def on_click(x, y, button, pressed):
+    if recording and not paused:
+        action = {"type": "click", "x": x, "y": y, "button": str(button), "pressed": pressed, "time": time.time()}
+        actions.append(action)
+        update_actions_display(action)
 
 def on_move(x, y):
-    global recorded_actions, is_recording, is_paused
-    if is_recording and not is_paused:
-        recorded_actions.append(('滑鼠', '移動', (x, y), time.time() - recording_start_time))
-
-def on_click(x, y, button, pressed):
-    global recorded_actions, is_recording, is_paused
-    if is_recording and not is_paused:
-        recorded_actions.append(('滑鼠', '點擊', (x, y, button.name, pressed), time.time() - recording_start_time))
+    if recording and not paused:
+        action = {"type": "move", "x": x, "y": y, "time": time.time()}
+        actions.append(action)
+        update_actions_display(action)
 
 def on_scroll(x, y, dx, dy):
-    global recorded_actions, is_recording, is_paused
-    if is_recording and not is_paused:
-        recorded_actions.append(('滑鼠', '滾動', (x, y, dx, dy), time.time() - recording_start_time))
+    if recording and not paused:
+        action = {"type": "scroll", "x": x, "y": y, "dx": dx, "dy": dy, "time": time.time()}
+        actions.append(action)
+        update_actions_display(action)
 
-# 啟動監控
-def start_listeners():
-    mouse_listener = mouse.Listener(on_move=on_move, on_click=on_click, on_scroll=on_scroll)
-    keyboard_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+def on_press(key):
+    if recording and not paused:
+        try:
+            action = {"type": "keydown", "key": str(key.char), "time": time.time()}
+        except AttributeError:
+            action = {"type": "keydown", "key": str(key), "time": time.time()}
+        actions.append(action)
+        update_actions_display(action)
 
-    mouse_listener.start()
-    keyboard_listener.start()
+def on_release(key):
+    if recording and not paused:
+        action = {"type": "keyup", "key": str(key), "time": time.time()}
+        actions.append(action)
+        update_actions_display(action)
 
-    mouse_listener.join()
-    keyboard_listener.join()
+# 開始錄製
+def start_recording():
+    global actions, recording, paused, mouse_listener, keyboard_listener
+    if not recording:
+        actions = []  # 清空舊的操作記錄
+        recording = True
+        paused = False
+        record_button.config(text="錄製中")
+        actions_display.delete(1.0, "end")
+        actions_display.insert("end", "錄製中...\n")
+        # 開始監聽滑鼠和鍵盤事件
+        mouse_listener = mouse.Listener(on_click=on_click, on_move=on_move, on_scroll=on_scroll)
+        keyboard_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        mouse_listener.start()
+        keyboard_listener.start()
 
-# 啟動監聽執行緒
-listener_thread = threading.Thread(target=start_listeners, daemon=True)
-listener_thread.start()
+# 停止錄製
+def stop_recording():
+    global recording, mouse_listener, keyboard_listener
+    if recording:
+        recording = False
+        save_actions()  # 儲存操作
+        record_button.config(text="開始錄製")
+        actions_display.insert("end", f"錄製完成，已儲存為: {current_filename}\n")
+        if mouse_listener:
+            mouse_listener.stop()
+        if keyboard_listener:
+            keyboard_listener.stop()
 
-# 設定 GUI
-app = tk.Tk()
-app.title("鍵盤與滑鼠操作錄製器")
-app.geometry("800x600")
+# 暫停與繼續錄製
+def toggle_pause():
+    global paused
+    if recording:  # 僅在錄製中可切換
+        paused = not paused
+        pause_button.config(text="繼續" if paused else "暫停")
 
-# 當前腳本選擇框
-script_list = StringVar()
-script_menu = tk.OptionMenu(app, script_list, '')
-script_menu.pack(pady=10)
+# 讀取已儲存的檔案
+def choose_file():
+    global current_filename
+    filename = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
+    if filename:
+        current_filename = os.path.basename(filename)  # 僅顯示檔案名稱
+        file_name_label.config(text=current_filename)
 
-# 按鈕區域
-frame = tk.Frame(app)
-frame.pack(pady=10)
+# 執行選擇的操作
+def execute_actions():
+    global current_filename
+    if current_filename:
+        filepath = os.path.join(os.getcwd(), current_filename)  # 確保完整路徑
+        loaded_actions = load_actions(filepath)
+        actions_display.delete(1.0, "end")
+        actions_display.insert("end", "執行中...\n")
+        if loaded_actions:
+            prev_time = loaded_actions[0]["time"]
+            for action in loaded_actions:
+                # 計算行為之間的延遲
+                delay = action["time"] - prev_time
+                if delay > 0:  # 確保延遲為正值
+                    time.sleep(delay)
+                prev_time = action["time"]
 
-start_button = tk.Button(frame, text="錄製", command=start_recording, width=10)
-start_button.grid(row=0, column=0, padx=10)
+                try:
+                    # 執行各種行為
+                    if action["type"] == "click":
+                        x, y, button, pressed = action["x"], action["y"], action["button"], action["pressed"]
+                        if pressed:
+                            pyautogui.mouseDown(x, y, button=button)
+                        else:
+                            pyautogui.mouseUp(x, y, button=button)
+                    elif action["type"] == "move":
+                        x, y = action["x"], action["y"]
+                        pyautogui.moveTo(x, y)
+                    elif action["type"] == "scroll":
+                        dx, dy, x, y = action["dx"], action["dy"], action.get("x", None), action.get("y", None)
+                        if x is not None and y is not None:
+                            pyautogui.scroll(dy, x, y)
+                        else:
+                            pyautogui.scroll(dy)
+                    elif action["type"] == "keydown":
+                        key = action["key"]
+                        pyautogui.keyDown(key)
+                    elif action["type"] == "keyup":
+                        key = action["key"]
+                        pyautogui.keyUp(key)
 
-pause_button = tk.Button(frame, text="暫停/繼續", command=pause_recording, width=10)
-pause_button.grid(row=0, column=1, padx=10)
+                    # 在動作視窗中顯示執行中的動作
+                    simplified_action = f"[{action['type']}]"
+                    if action["type"] in ["click", "move"]:
+                        simplified_action += f" X: {action.get('x', 'N/A')} Y: {action.get('y', 'N/A')}"
+                    elif action["type"] in ["keydown", "keyup"]:
+                        simplified_action += f" Key: {action['key']}"
+                    elif action["type"] == "scroll":
+                        simplified_action += f" DX: {action['dx']} DY: {action['dy']}"
+                    actions_display.insert("end", f"{simplified_action}\n")
+                    actions_display.see("end")
+                except Exception as e:
+                    # 捕獲可能的錯誤並顯示
+                    actions_display.insert("end", f"執行動作時發生錯誤: {str(e)}\n")
+                    actions_display.see("end")
+        else:
+            actions_display.insert("end", "無效的檔案或內容為空！\n")
+    else:
+        actions_display.insert("end", "未選擇檔案！\n")
 
-stop_button = tk.Button(frame, text="停止", command=stop_recording, width=10)
-stop_button.grid(row=0, column=2, padx=10)
 
-save_button = tk.Button(frame, text="存檔", command=save_recording, width=10)
-save_button.grid(row=0, column=3, padx=10)
+# UI設置
+root = ttk.Window(themename="superhero")
+root.title("SRunes")
 
-execute_button = tk.Button(frame, text="執行", command=execute_recording, width=10)
-execute_button.grid(row=0, column=4, padx=10)
+# 開始錄製按鈕
+record_button = ttk.Button(root, text="開始錄製", command=start_recording)
+record_button.grid(row=0, column=0, padx=5, pady=5)
 
-# 代碼顯示區域
-code_display = scrolledtext.ScrolledText(app, height=25, width=95, state='normal')
-code_display.pack(pady=10)
-code_display.insert(tk.END, "代碼執行結果會顯示於此。\n")
+# 暫停與繼續按鈕
+pause_button = ttk.Button(root, text="暫停", command=toggle_pause)
+pause_button.grid(row=0, column=1, padx=5, pady=5)
 
-# 更新腳本列表
-# update_script_list()
+# 停止錄製按鈕 (F9 快捷鍵)
+stop_button = ttk.Button(root, text="停止錄製(F9)", command=stop_recording)
+stop_button.grid(row=0, column=2, padx=5, pady=5)
 
-# 啟動主循環
-app.mainloop()
+# 選擇存檔按鈕
+choose_button = ttk.Button(root, text="選擇存檔", command=choose_file)
+choose_button.grid(row=1, column=0, padx=5, pady=5)
+
+# 存檔名稱顯示
+file_name_label = ttk.Label(root, text="未選擇存檔")
+file_name_label.grid(row=1, column=1, padx=5, pady=5)
+
+# 執行按鈕
+execute_button = ttk.Button(root, text="執行", command=execute_actions)
+execute_button.grid(row=2, column=0, columnspan=3, padx=5, pady=5)
+
+# 顯示當前執行的動作代碼
+actions_display = ttk.Text(root, height=12, width=64)
+actions_display.grid(row=3, column=0, columnspan=3, padx=5, pady=5)
+
+root.mainloop()
