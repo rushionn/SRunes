@@ -34,20 +34,33 @@ def load_actions(filename):
     return []
 
 # 更新動作代碼到窗框 (簡化顯示)
+# 新增：錄製提示
 def update_actions_display(action):
     simplified_action = ""
     if action["type"] == "click":
-        simplified_action = f"[click] X: {action['x']} Y: {action['y']}"
+        simplified_action = f"[click] X: {action['x']} Y: {action['y']} Button: {action['button']} Pressed: {action['pressed']}"
     elif action["type"] == "move":
         simplified_action = f"[move] X: {action['x']} Y: {action['y']}"
     elif action["type"] == "scroll":
         simplified_action = f"[scroll] DX: {action['dx']} DY: {action['dy']}"
     elif action["type"] in ["keydown", "keyup"]:
         simplified_action = f"[{action['type']}] Key: {action['key']}"
+    else:
+        simplified_action = "[unknown event]"
     actions_display.insert("end", f"{simplified_action}\n")
-    actions_display.see("end")  # 滾動到最新
+    actions_display.see("end")
+
+# 新增：滑鼠移動空閒提示
+def idle_mouse_check():
+    if not recording or paused:
+        return
+    if len(actions) == 0:  # 未有事件時提示
+        actions_display.insert("end", "滑鼠未移動或無按鍵事件...\n")
+        actions_display.see("end")
+    root.after(5000, idle_mouse_check)
 
 # 錄製滑鼠和鍵盤事件
+# 修正滑鼠事件
 def on_click(x, y, button, pressed):
     if recording and not paused:
         action = {
@@ -91,39 +104,44 @@ def on_release(key):
         stop_recording()
 
 # 開始錄製
+# 修正：滑鼠和鍵盤監聽初始化
 def start_recording():
     global actions, recording, paused, mouse_listener, keyboard_listener
-    
-    if not recording:
-        actions.clear()  # 清空舊的操作記錄
-        recording = True
-        paused = False
-        record_button.config(text="錄製中")
-        actions_display.delete(1.0, "end")
-        actions_display.insert("end", "錄製中...\n")
-        try:
-            # 開始監聽滑鼠和鍵盤事件
+    try:
+        if not recording:
+            actions.clear()  # 清空舊的操作記錄
+            recording = True
+            paused = False
+            record_button.config(text="錄製中")
+            actions_display.delete(1.0, "end")
+            actions_display.insert("end", "錄製中...\n")
+            # 初始化監聽器
             mouse_listener = mouse.Listener(on_click=on_click, on_move=on_move, on_scroll=on_scroll)
             keyboard_listener = keyboard.Listener(on_press=on_press, on_release=on_release)
             mouse_listener.start()
             keyboard_listener.start()
-        except Exception as e:
-            actions_display.insert("end", f"無法開始錄製： {str(e)}\n")
+    except Exception as e:
+        actions_display.insert("end", f"錄製啟動失敗：{e}\n")
 
 # 停止錄製
+# 修正：在停止錄製時檢查監聽器是否存在
 def stop_recording():
     global recording, mouse_listener, keyboard_listener
     if recording:
         recording = False
         save_actions()  # 儲存操作
         record_button.config(text="開始錄製")
-        actions_display.insert("end", f"錄製完成，已儲存為: {current_filename}\n")
-        if mouse_listener:
-            mouse_listener.stop()
-            mouse_listener = None
-        if keyboard_listener:
-            keyboard_listener.stop()
-            keyboard_listener = None
+        actions_display.insert("end", f"錄製完成，儲存為：{current_filename}\n")
+        # 停止監聽器
+        try:
+            if mouse_listener:
+                mouse_listener.stop()
+                mouse_listener = None
+            if keyboard_listener:
+                keyboard_listener.stop()
+                keyboard_listener = None
+        except Exception as e:
+            actions_display.insert("end", f"停止監聽時發生錯誤：{e}\n")
         gc.collect()  # 垃圾回收
 
 # 暫停與繼續錄製
@@ -237,4 +255,5 @@ actions_display.grid(row=3, column=0, columnspan=3, padx=5, pady=5)
 # 啟動全域快捷鍵監聽
 listen_for_emergency_stop()
 
+idle_mouse_check()
 root.mainloop()
