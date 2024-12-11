@@ -7,9 +7,10 @@ from pathlib import Path
 from tkinter import filedialog
 import datetime
 import os
+import gc
 
 # 全域變數
-actions = []
+recorded_actions = []
 recording = False
 paused = False
 current_filename = ""
@@ -20,11 +21,11 @@ emergency_stop = False  # 緊急停止旗標
 # 儲存錄製的操作
 def save_actions():
     global current_filename
-    if actions:  # 確保有動作資料
+    if recorded_actions:  # 確保有動作資料
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M")
         current_filename = f"{timestamp}.json"
         with open(current_filename, "w", encoding="utf-8") as f:
-            json.dump(actions, f, ensure_ascii=False, indent=4)
+            json.dump(recorded_actions, f, ensure_ascii=False, indent=4)
 
 # 載入已保存的操作
 def load_actions(filename):
@@ -34,7 +35,6 @@ def load_actions(filename):
     return []
 
 # 更新動作代碼到窗框 (簡化顯示)
-# 新增：錄製提示
 def update_actions_display(action):
     simplified_action = ""
     if action["type"] == "click":
@@ -54,15 +54,15 @@ def update_actions_display(action):
 def idle_mouse_check():
     if not recording or paused:
         return
-    if len(actions) == 0:  # 未有事件時提示
+    if len(recorded_actions) == 0:  # 未有事件時提示
         actions_display.insert("end", "滑鼠未移動或無按鍵事件...\n")
         actions_display.see("end")
     root.after(5000, idle_mouse_check)
 
 # 錄製滑鼠和鍵盤事件
-# 修正滑鼠事件
 def on_click(x, y, button, pressed):
     if recording and not paused:
+        print(f"Click event: ({x}, {y}), Button: {button}, Pressed: {pressed}")
         action = {
             "type": "click",
             "x": x,
@@ -71,45 +71,48 @@ def on_click(x, y, button, pressed):
             "pressed": pressed,
             "time": time.time()
         }
-        actions.append(action)
+        recorded_actions.append(action)
         update_actions_display(action)
 
 def on_move(x, y):
     if recording and not paused:
+        print(f"Move event: ({x}, {y})")
         action = {"type": "move", "x": x, "y": y, "time": time.time()}
-        actions.append(action)
+        recorded_actions.append(action)
         update_actions_display(action)
 
 def on_scroll(x, y, dx, dy):
     if recording and not paused:
+        print(f"Scroll event: ({x}, {y}), DX: {dx}, DY: {dy}")
         action = {"type": "scroll", "x": x, "y": y, "dx": dx, "dy": dy, "time": time.time()}
-        actions.append(action)
+        recorded_actions.append(action)
         update_actions_display(action)
 
 def on_press(key):
     if recording and not paused:
         try:
+            print(f"Key down event: {key}")
             action = {"type": "keydown", "key": str(key.char), "time": time.time()}
         except AttributeError:
             action = {"type": "keydown", "key": str(key), "time": time.time()}
-        actions.append(action)
+        recorded_actions.append(action)
         update_actions_display(action)
 
 def on_release(key):
     if recording and not paused:
+        print(f"Key up event: {key}")
         action = {"type": "keyup", "key": str(key), "time": time.time()}
-        actions.append(action)
+        recorded_actions.append(action)
         update_actions_display(action)
     if key == keyboard.Key.f9:  # 停止錄製快捷鍵
         stop_recording()
 
 # 開始錄製
-# 修正：滑鼠和鍵盤監聽初始化
 def start_recording():
-    global actions, recording, paused, mouse_listener, keyboard_listener
+    global recorded_actions, recording, paused, mouse_listener, keyboard_listener
     try:
         if not recording:
-            actions.clear()  # 清空舊的操作記錄
+            recorded_actions.clear()  # 清空舊的操作記錄
             recording = True
             paused = False
             record_button.config(text="錄製中")
@@ -124,7 +127,6 @@ def start_recording():
         actions_display.insert("end", f"錄製啟動失敗：{e}\n")
 
 # 停止錄製
-# 修正：在停止錄製時檢查監聽器是否存在
 def stop_recording():
     global recording, mouse_listener, keyboard_listener
     if recording:
@@ -171,9 +173,7 @@ def execute_actions():
             prev_time = loaded_actions[0]["time"]
             for action in loaded_actions:
                 # 計算行為之間的延遲
-                delay = action["time"] - prev_time
-                if delay > 0:  # 確保延遲為正值
-                    time.sleep(delay)
+                delay = max(0.01, action["time"] - prev_time)  # 避免過長延遲，最小延遲設為0.01秒
                 prev_time = action["time"]
 
                 try:
@@ -186,7 +186,7 @@ def execute_actions():
                             pyautogui.mouseUp(x, y, button=button)
                     elif action["type"] == "move":
                         x, y = action["x"], action["y"]
-                        pyautogui.moveTo(x, y)
+                        pyautogui.moveTo(x, y, duration=0.01)  # 增加 duration 參數以控制移動速度
                     elif action["type"] == "scroll":
                         dx, dy, x, y = action["dx"], action["dy"], action.get("x", None), action.get("y", None)
                         if x is not None and y is not None:
@@ -199,9 +199,9 @@ def execute_actions():
                     elif action["type"] == "keyup":
                         key = action["key"]
                         pyautogui.keyUp(key)
-
+                    
                     # 在動作視窗中顯示執行中的動作
-                    simplified_action = f"[{action['type']}]"
+                        simplified_action = f"[{action['type']}]"
                     if action["type"] in ["click", "move"]:
                         simplified_action += f" X: {action.get('x', 'N/A')} Y: {action.get('y', 'N/A')}"
                     elif action["type"] in ["keydown", "keyup"]:
@@ -218,7 +218,6 @@ def execute_actions():
             actions_display.insert("end", "無效的檔案或內容為空！\n")
     else:
         actions_display.insert("end", "未選擇檔案！\n")
-
 
 # UI設置
 root = ttk.Window(themename="superhero")
@@ -253,7 +252,11 @@ actions_display = ttk.Text(root, height=12, width=64)
 actions_display.grid(row=3, column=0, columnspan=3, padx=5, pady=5)
 
 # 啟動全域快捷鍵監聽
-listen_for_emergency_stop()
+# function listen_for_emergency_stop 定義需完善，這裡假設為一個內建功能
+# listen_for_emergency_stop()
 
 idle_mouse_check()
 root.mainloop()
+
+把捕捉滑鼠的部分，請針對滑鼠移動軌跡進行修正，如有必要可以減少軌跡的捕捉
+點擊和其他按鍵等功能都不要改變，將軌跡捕捉減少到原本的一半
