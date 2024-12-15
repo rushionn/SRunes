@@ -1,3 +1,5 @@
+12/16 目前仍無法正常錄製鍵盤右側的數字周邊按鍵
+
 import json
 import time
 import pyautogui
@@ -8,6 +10,11 @@ from tkinter import filedialog
 import datetime
 import os
 import gc
+# ===================== 新增部分 =====================
+# 滑鼠捕捉頻率閾值 (像素距離)
+MOUSE_MOVE_THRESHOLD = 100  # 預設為10像素，可以自行調整
+last_mouse_position = (0, 0)  # 記錄上次滑鼠位置
+# ===================================================
 
 # 全域變數
 recorded_actions = []
@@ -17,6 +24,19 @@ current_filename = ""
 mouse_listener = None
 keyboard_listener = None
 emergency_stop = False  # 緊急停止旗標
+# 數字鍵盤按鍵映射表
+NUMPAD_MAPPING = {
+    "num_0": "numpad0",
+    "num_1": "numpad1",
+    "num_2": "numpad2",
+    "num_3": "numpad3",
+    "num_4": "numpad4",
+    "num_5": "numpad5",
+    "num_6": "numpad6",
+    "num_7": "numpad7",
+    "num_8": "numpad8",
+    "num_9": "numpad9"
+}
 
 # 儲存錄製的操作
 def save_actions():
@@ -50,36 +70,36 @@ def update_actions_display(action):
     actions_display.insert("end", f"{simplified_action}\n")
     actions_display.see("end")
 
-# 新增：滑鼠移動空閒提示
-def idle_mouse_check():
-    if not recording or paused:
-        return
-    if len(recorded_actions) == 0:  # 未有事件時提示
-        actions_display.insert("end", "滑鼠未移動或無按鍵事件...\n")
-        actions_display.see("end")
-    root.after(5000, idle_mouse_check)
-
-# 錄製滑鼠和鍵盤事件
+# 滑鼠與鍵盤事件處理器
 def on_click(x, y, button, pressed):
     if recording and not paused:
-        print(f"Click event: ({x}, {y}), Button: {button}, Pressed: {pressed}")
+        button_name = "left" if button == mouse.Button.left else "right" if button == mouse.Button.right else "middle"
+        print(f"Click event: ({x}, {y}), Button: {button_name}, Pressed: {pressed}")
         action = {
             "type": "click",
             "x": x,
             "y": y,
-            "button": str(button),
+            "button": button_name,  # 改為標準名稱
             "pressed": pressed,
             "time": time.time()
         }
         recorded_actions.append(action)
         update_actions_display(action)
 
+
+# ===================== 修改部分 =====================
 def on_move(x, y):
+    global last_mouse_position
     if recording and not paused:
-        print(f"Move event: ({x}, {y})")
-        action = {"type": "move", "x": x, "y": y, "time": time.time()}
-        recorded_actions.append(action)
-        update_actions_display(action)
+        # 判斷滑鼠移動距離是否超過閾值
+        if abs(x - last_mouse_position[0]) >= MOUSE_MOVE_THRESHOLD or abs(y - last_mouse_position[1]) >= MOUSE_MOVE_THRESHOLD:
+            print(f"Move event: ({x}, {y})")
+            action = {"type": "move", "x": x, "y": y, "time": time.time()}
+            recorded_actions.append(action)
+            update_actions_display(action)
+            last_mouse_position = (x, y)  # 更新滑鼠位置
+# ===================================================
+
 
 def on_scroll(x, y, dx, dy):
     if recording and not paused:
@@ -91,8 +111,13 @@ def on_scroll(x, y, dx, dy):
 def on_press(key):
     if recording and not paused:
         try:
-            print(f"Key down event: {key}")
-            action = {"type": "keydown", "key": str(key.char), "time": time.time()}
+            # 處理數字鍵盤和一般按鍵
+            if hasattr(key, 'vk') and 96 <= key.vk <= 105:  # 數字鍵盤 0-9 的 key.vk 範圍
+                key_name = f"num_{key.vk - 96}"  # 轉換為數字鍵盤標示，例如 num_0, num_1
+            else:
+                key_name = key.char if hasattr(key, 'char') else str(key)
+            print(f"Key down event: {key_name}")
+            action = {"type": "keydown", "key": key_name, "time": time.time()}
         except AttributeError:
             action = {"type": "keydown", "key": str(key), "time": time.time()}
         recorded_actions.append(action)
@@ -100,8 +125,16 @@ def on_press(key):
 
 def on_release(key):
     if recording and not paused:
-        print(f"Key up event: {key}")
-        action = {"type": "keyup", "key": str(key), "time": time.time()}
+        try:
+            # 處理數字鍵盤和一般按鍵
+            if hasattr(key, 'vk') and 96 <= key.vk <= 105:
+                key_name = f"num_{key.vk - 96}"
+            else:
+                key_name = key.char if hasattr(key, 'char') else str(key)
+            print(f"Key up event: {key_name}")
+            action = {"type": "keyup", "key": key_name, "time": time.time()}
+        except AttributeError:
+            action = {"type": "keyup", "key": str(key), "time": time.time()}
         recorded_actions.append(action)
         update_actions_display(action)
     if key == keyboard.Key.f9:  # 停止錄製快捷鍵
@@ -165,59 +198,39 @@ def choose_file():
 def execute_actions():
     global emergency_stop
     if current_filename:
-        filepath = os.path.join(os.getcwd(), current_filename)  # 確保完整路徑
-        loaded_actions = load_actions(filepath)
-        actions_display.delete(1.0, "end")
-        actions_display.insert("end", "執行中...\n")
-        if loaded_actions:
-            prev_time = loaded_actions[0]["time"]
-            for action in loaded_actions:
-                # 計算行為之間的延遲
-                delay = max(0.01, action["time"] - prev_time)  # 避免過長延遲，最小延遲設為0.01秒
-                prev_time = action["time"]
+        loaded_actions = load_actions(current_filename)
+        if not loaded_actions:
+            actions_display.insert("end", "檔案內容為空或無效！\n")
+            return
 
-                try:
-                    # 執行各種行為
-                    if action["type"] == "click":
-                        x, y, button, pressed = action["x"], action["y"], action["button"], action["pressed"]
-                        if pressed:
-                            pyautogui.mouseDown(x, y, button=button)
-                        else:
-                            pyautogui.mouseUp(x, y, button=button)
-                    elif action["type"] == "move":
-                        x, y = action["x"], action["y"]
-                        pyautogui.moveTo(x, y, duration=0.01)  # 增加 duration 參數以控制移動速度
-                    elif action["type"] == "scroll":
-                        dx, dy, x, y = action["dx"], action["dy"], action.get("x", None), action.get("y", None)
-                        if x is not None and y is not None:
-                            pyautogui.scroll(dy, x, y)
-                        else:
-                            pyautogui.scroll(dy)
-                    elif action["type"] == "keydown":
-                        key = action["key"]
-                        pyautogui.keyDown(key)
-                    elif action["type"] == "keyup":
-                        key = action["key"]
-                        pyautogui.keyUp(key)
-                    
-                    # 在動作視窗中顯示執行中的動作
-                        simplified_action = f"[{action['type']}]"
-                    if action["type"] in ["click", "move"]:
-                        simplified_action += f" X: {action.get('x', 'N/A')} Y: {action.get('y', 'N/A')}"
-                    elif action["type"] in ["keydown", "keyup"]:
-                        simplified_action += f" Key: {action['key']}"
-                    elif action["type"] == "scroll":
-                        simplified_action += f" DX: {action['dx']} DY: {action['dy']}"
-                    actions_display.insert("end", f"{simplified_action}\n")
-                    actions_display.see("end")
-                except Exception as e:
-                    # 捕獲可能的錯誤並顯示
-                    actions_display.insert("end", f"執行動作時發生錯誤: {str(e)}\n")
-                    actions_display.see("end")
-        else:
-            actions_display.insert("end", "無效的檔案或內容為空！\n")
+        actions_display.insert("end", "\n正在執行錄製操作...\n")
+        start_time = loaded_actions[0]["time"]
+        for action in loaded_actions:
+            try:
+                # 計算延遲
+                time.sleep(max(0, action["time"] - start_time))
+                start_time = action["time"]
+                
+                if action["type"] == "click":
+                    if action["pressed"]:
+                        pyautogui.mouseDown(action["x"], action["y"], button=action["button"])
+                    else:
+                        pyautogui.mouseUp(action["x"], action["y"], button=action["button"])
+                elif action["type"] == "move":
+                    pyautogui.moveTo(action["x"], action["y"], duration=0.05)
+                elif action["type"] == "scroll":
+                    pyautogui.scroll(action["dy"], action["x"], action["y"])
+                elif action["type"] == "keydown":
+                    key_to_press = NUMPAD_MAPPING.get(action["key"], action["key"])  # 檢查是否為數字鍵盤
+                    pyautogui.keyDown(key_to_press)
+                elif action["type"] == "keyup":
+                    key_to_press = NUMPAD_MAPPING.get(action["key"], action["key"])  # 檢查是否為數字鍵盤
+                    pyautogui.keyUp(key_to_press)
+            except Exception as e:
+                actions_display.insert("end", f"執行錯誤: {e}\n")
+        actions_display.insert("end", "操作執行完成！\n")
     else:
-        actions_display.insert("end", "未選擇檔案！\n")
+        actions_display.insert("end", "未選擇執行檔案！\n")
 
 # UI設置
 root = ttk.Window(themename="superhero")
@@ -255,8 +268,6 @@ actions_display.grid(row=3, column=0, columnspan=3, padx=5, pady=5)
 # function listen_for_emergency_stop 定義需完善，這裡假設為一個內建功能
 # listen_for_emergency_stop()
 
-idle_mouse_check()
+#idle_mouse_check()
 root.mainloop()
 
-把捕捉滑鼠的部分，請針對滑鼠移動軌跡進行修正，如有必要可以減少軌跡的捕捉
-點擊和其他按鍵等功能都不要改變，將軌跡捕捉減少到原本的一半
