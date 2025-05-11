@@ -1,246 +1,262 @@
-import pyautogui
-import keyboard
 import json
 import time
+import pyautogui
 import threading
-from pynput.mouse import Listener as MouseListener
-from pynput.mouse import Controller as MouseController
-from pynput.keyboard import Listener as KeyboardListener
-from pynput.keyboard import Controller as KeyboardController
-from tkinter import Tk, Button, Label, Checkbutton, IntVar, Frame, Text, Scrollbar, Scale, HORIZONTAL, Entry, filedialog
-from datetime import datetime
+import datetime
 import os
-import sys
-import random
+import keyboard as kb  # 新的鍵盤模組
+from pynput import mouse
+from pathlib import Path
+import ttkbootstrap as ttk
+from tkinter import filedialog
+from typing import List, Dict, Any, Optional
 
-# 儲存錄製的操作
-operations = []
+class AutomationScriptTool:
+    def __init__(self):
+        self.root = ttk.Window(themename="superhero")
+        self.root.title("自動化腳本工具")
+        self.MOUSE_MOVE_THRESHOLD = 50
+        self.last_mouse_position = (0, 0)
+        self.actions: List[Dict] = []
+        self.recording = False
+        self.paused = False
+        self.paused_playback = False
+        self.current_file = ""
+        self.mouse_listener = None
+        self.repeat_times = 1
+        self.playback_delay = 0.0
+        self.replay_speed = 1.0
+        self.start_time = 0.0
+        self.log_dir = "logs"
+        self.KEY_MAP = {
+            "shift": "shift", "shift_r": "shift",
+            "ctrl": "ctrl", "ctrl_r": "ctrl",
+            "alt": "alt", "alt_r": "alt",
+            "enter": "enter", "space": "space", "tab": "tab",
+            "f9": "f9", "f10": "f10", "f11": "f11", "f12": "f12",
+        }
+        self.active_modifiers = []
+        os.makedirs(self.log_dir, exist_ok=True)
+        self._setup_ui()
+        self._setup_global_keys()
 
-# Yuna特色：隨機亂飛或錯誤操作
-yuna_feature_enabled = False
+    def _setup_ui(self):
+        button_width = 15
+        ttk.Button(self.root, text="開始錄製 (F9)", command=self.start_recording, width=button_width).grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        ttk.Button(self.root, text="停止錄製 (F10)", command=self.stop_recording, width=button_width).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(self.root, text="選擇檔案", command=self.choose_file, width=button_width).grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        self.repeat_entry = ttk.Entry(self.root, width=6)
+        self.repeat_entry.insert(0, "1")
+        self.repeat_entry.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
+        ttk.Button(self.root, text="執行回放 (F12)", command=self.execute_actions, width=button_width).grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        self.pause_btn = ttk.Button(self.root, text="暫停回放 (F11)", command=self.toggle_pause_playback, width=button_width)
+        self.pause_btn.grid(row=1, column=2, padx=5, pady=5, sticky="ew")
+        self.file_label = ttk.Label(self.root, text="尚未選擇檔案")
+        self.file_label.grid(row=2, column=0, columnspan=3, pady=5)
+        self.display = ttk.Text(self.root, height=15, width=70)
+        self.display.grid(row=3, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
+        self.root.grid_columnconfigure((0, 1, 2), weight=1)
+        self.root.grid_rowconfigure(3, weight=1)
+        self.root.protocol("WM_DELETE_WINDOW", self.cleanup)
 
-# 控制回放延遲
-playback_delay = 0.1  # 默認延遲
+    def _setup_global_keys(self):
+        kb.on_press_key("f9", lambda _: self.start_recording(), suppress=False)
+        kb.on_press_key("f10", lambda _: self.stop_recording(), suppress=False)
+        kb.on_press_key("f11", lambda _: self.toggle_pause_playback(), suppress=False)
+        kb.on_press_key("f12", lambda _: self.execute_actions(), suppress=False)
 
-# 當前操作顯示區
-current_action = ""
+    def save_actions(self) -> str:
+        if not self.actions: return ""
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M")
+        fn = f"{self.log_dir}/script_{timestamp}.json"
+        with open(fn, "w", encoding="utf-8") as f:
+            json.dump(self.actions, f, ensure_ascii=False, indent=4)
+        self._msg(f"已儲存至 {fn}")
+        return fn
 
-# 回放次數
-replay_count = 0
+    def load_actions(self, fn: str) -> List[Dict]:
+        if Path(fn).exists():
+            with open(fn, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return []
 
-# 更新動作顯示區的內容
-def update_action(action_text):
-    global current_action
-    current_action = action_text
-    action_text_widget.delete(1.0, "end")
-    action_text_widget.insert("insert", current_action + "\n")
+    def on_click(self, x: int, y: int, button: mouse.Button, pressed: bool):
+        if self.recording and not self.paused:
+            elapsed_time = round(time.time() - self.start_time, 3)
+            action = {"type": "click", "x": x, "y": y, "button": button.name, "pressed": pressed, "time": elapsed_time}
+            self.actions.append(action)
+            self._update_display(action)
 
-# 捕捉滑鼠移動的回調函數
-def on_move(x, y):
-    timestamp = time.time() - start_time
-    operations.append({
-        "type": "move", "x": x, "y": y, "time": timestamp
-    })
-    update_action(f"滑鼠移動到: ({x}, {y}) 時間戳記: {timestamp:.4f}")
+    def on_move(self, x: int, y: int):
+        if self.recording and not self.paused:
+            elapsed_time = round(time.time() - self.start_time, 3)
+            distance = ((x - self.last_mouse_position[0])**2 + (y - self.last_mouse_position[1])**2)**0.5
+            if distance >= self.MOUSE_MOVE_THRESHOLD:
+                action = {"type": "move", "x": x, "y": y, "time": elapsed_time}
+                self.actions.append(action)
+                self._update_display(action)
+                self.last_mouse_position = (x, y)
 
-# 捕捉滑鼠點擊的回調函數
-def on_click(x, y, button, pressed):
-    if pressed:
-        timestamp = time.time() - start_time
-        operations.append({
-            "type": "click", "x": x, "y": y, "button": button.name, "time": timestamp
-        })
-        update_action(f"滑鼠點擊: ({x}, {y}) 按鈕: {button.name} 時間戳記: {timestamp:.4f}")
-
-# 捕捉滑鼠滾輪的回調函數
-def on_scroll(x, y, dx, dy):
-    timestamp = time.time() - start_time
-    operations.append({
-        "type": "scroll", "x": x, "y": y, "dx": dx, "dy": dy, "time": timestamp
-    })
-    update_action(f"滑鼠滾輪: ({dx}, {dy}) 時間戳記: {timestamp:.4f}")
-
-# 捕捉鍵盤按鍵事件
-def on_press(key):
-    try:
-        timestamp = time.time() - start_time
-        operations.append({"type": "keyboard", "key": key.char, "time": timestamp})
-        update_action(f"按下鍵: {key.char} 時間戳記: {timestamp:.4f}")
-    except AttributeError:
-        timestamp = time.time() - start_time
-        operations.append({"type": "keyboard", "key": str(key), "time": timestamp})
-        update_action(f"按下鍵: {key} 時間戳記: {timestamp:.4f}")
-
-# 錄製操作的函數
-def record_operations():
-    global operations
-    update_action("錄製開始！按下 F10 來停止錄製")
-    start_time = time.time()  # 記錄開始時間
-
-    # 設定滑鼠監聽器
-    mouse_listener = MouseListener(on_move=on_move, on_click=on_click, on_scroll=on_scroll)
-    mouse_listener.start()
-
-    # 設定鍵盤監聽器
-    keyboard_listener = KeyboardListener(on_press=on_press)
-    keyboard_listener.start()
-
-    while True:
-        if keyboard.is_pressed('F10'):  # F10 停止錄製
-            update_action("停止錄製。")
-            save_operations()  # 自動保存
-            break
-
-        time.sleep(0.1)
-
-# 儲存操作至 JSON 檔案
-def save_operations():
-    timestamp = datetime.now().strftime("%d-%m-%S")  # 使用當前時間作為檔案名稱
-    file_name = f"operations_{timestamp}.json"
-    with open(file_name, 'w') as f:
-        json.dump(operations, f)
-    update_action(f"操作已儲存至 {file_name}！")
-
-# 回放操作的函數
-def replay_operations():
-    global replay_count
-    update_action("回放開始！")
-    start_time = time.time()  # 回放開始時間
-    replay_count += 1
-
-    for op in operations:
-        elapsed_time = op["time"]  # 距離回放開始的時間
-        time.sleep(elapsed_time)  # 根據時間戳延遲播放
-
-        if op['type'] == 'move':
-            if yuna_feature_enabled and random.random() < 0.1:  # 開啟 Yuna 特色功能，隨機亂飛
-                random_offset = random.randint(-100, 100)
-                pyautogui.moveTo(op['x'] + random_offset, op['y'] + random_offset, duration=playback_delay)
-                update_action(f"Yuna 隨機亂飛！")
+    def on_key_press(self, event):
+        if self.recording and not self.paused:
+            key = event.name.lower()
+            if key in {"f9", "f10", "f11", "f12"}:  # 避免記錄控制鍵
+                return
+            t = round(time.time() - self.start_time, 3)
+            k = self.KEY_MAP.get(key, key)
+            if k in {"shift", "ctrl", "alt"}:
+                self.active_modifiers.append(k)
+                action = {"type": "keydown", "key": k, "time": t}
+            elif self.active_modifiers:
+                action = {"type": "hotkey", "keys": self.active_modifiers + [k], "time": t}
+                self.active_modifiers.clear()
             else:
-                pyautogui.moveTo(op['x'], op['y'], duration=playback_delay)
-        
-        elif op['type'] == 'click':
-            pyautogui.click(op['x'], op['y'], button=op['button'])
-            update_action(f"回放點擊: {op['button']} at ({op['x']}, {op['y']})")
-        
-        elif op['type'] == 'keyboard':
-            keyboard.press(op['key'])
-            keyboard.release(op['key'])
-            update_action(f"回放按下鍵: {op['key']}")
-        
-        elif op['type'] == 'scroll':
-            pyautogui.scroll(op['dy'])
-            update_action(f"回放滾輪: {op['dy']}")
+                action = {"type": "keydown", "key": k, "time": t}
+            self.actions.append(action)
+            self._msg(action)
 
-    update_action(f"回放結束！回放次數: {replay_count}")
+    def on_key_release(self, event):
+        if self.recording and not self.paused:
+            key = event.name.lower()
+            if key in {"f9", "f10", "f11", "f12"}:
+                return
+            t = round(time.time() - self.start_time, 3)
+            k = self.KEY_MAP.get(key, key)
+            if k not in {"shift", "ctrl", "alt"} or not self.active_modifiers:
+                action = {"type": "keyup", "key": k, "time": t}
+                self.actions.append(action)
+                self._msg(action)
 
-# 回放速度的調整
-def update_playback_delay(val):
-    global playback_delay
-    playback_delay = float(val) / 100  # 回放速度設為 100 時為正常速度
-    update_action(f"回放延遲設定為: {playback_delay}秒")
+    def execute_actions(self):
+        if not self.current_file:
+            self._msg("未選擇檔案")
+            return
+        acts = self.load_actions(self.current_file)
+        if acts:
+            self.display.delete(1.0, "end")
+            try:
+                self.repeat_times = int(self.repeat_entry.get() or 1)
+            except ValueError:
+                self.repeat_times = 1
+            self._msg(f"開始回放 {self.repeat_times} 次")
+            threading.Thread(target=self._replay_actions, args=(acts,), daemon=True).start()
 
-# 讀取操作檔案
-def load_operations():
-    global operations
-    file_path = filedialog.askopenfilename(title="選擇操作檔案", filetypes=[("JSON Files", "*.json")])
-    if file_path:
-        with open(file_path, 'r') as f:
-            operations = json.load(f)
-        update_action(f"已讀取檔案: {file_path.split('/')[-1]}")
+    def _replay_actions(self, actions: List[Dict]):
+        held = set()
+        for _ in range(self.repeat_times):
+            start = time.time()
+            for a in actions:
+                while self.paused_playback:
+                    time.sleep(0.1)
+                delay = max(0, a["time"] - (time.time() - start) + self.playback_delay) / self.replay_speed
+                time.sleep(delay)
+                try:
+                    if a["type"] == "click":
+                        pyautogui.moveTo(a["x"], a["y"], duration=0.01)
+                        if a["pressed"]:
+                            pyautogui.mouseDown(button=a["button"])
+                        else:
+                            pyautogui.mouseUp(button=a["button"])
+                    elif a["type"] == "move":
+                        pyautogui.moveTo(a["x"], a["y"], duration=0.01)
+                    elif a["type"] == "hotkey":
+                        for key in a["keys"]:
+                            kb.press(key)
+                        time.sleep(0.05)  # 確保組合鍵被識別
+                        for key in reversed(a["keys"]):
+                            kb.release(key)
+                    elif a["type"] == "keydown":
+                        kb.press(a["key"])
+                        held.add(a["key"])
+                        time.sleep(0.01)  # 模擬物理按鍵間隔
+                    elif a["type"] == "keyup":
+                        kb.release(a["key"])
+                        held.discard(a["key"])
+                except Exception as e:
+                    self._msg(f"回放錯誤: {e}")
+            self._msg("回放完成一輪")
+            for k in list(held):
+                kb.release(k)
+            held.clear()
+        self._msg("回放結束")
 
-# UI 控制
-def start_recording():
-    global operations
-    operations = []  # 清空以前的錄製
-    recording_thread = threading.Thread(target=record_operations)
-    recording_thread.start()
-    start_button.config(state="disabled")  # 禁用開始錄製按鈕
-    stop_button.config(state="normal")  # 啟用停止錄製按鈕
+    def start_recording(self):
+        if not self.recording:
+            self.actions.clear()
+            self.recording = True
+            self.paused = False
+            self.start_time = time.time()
+            self.last_mouse_position = pyautogui.position()
+            self._msg("開始錄製...")
+            self.mouse_listener = mouse.Listener(on_click=self.on_click, on_move=self.on_move)
+            kb.hook(self.on_key_press)  # 使用 keyboard 模組監聽鍵盤
+            kb.on_release(self.on_key_release)
+            self.mouse_listener.start()
 
-def stop_recording():
-    update_action("停止錄製中...")
-    save_operations()  # 儲存錄製結果
-    start_button.config(state="normal")  # 啟用開始錄製按鈕
-    stop_button.config(state="disabled")  # 禁用停止錄製按鈕
+    def stop_recording(self):
+        if self.recording:
+            self.recording = False
+            if self.mouse_listener:
+                self.mouse_listener.stop()
+            kb.unhook_all()  # 停止所有鍵盤鉤子
+            fn = self.save_actions()
+            if fn and Path(fn).exists():
+                self.current_file = fn
+                self.file_label.config(text=os.path.basename(fn))
+            self._msg("錄製完成")
 
-def start_replaying():
-    replay_thread = threading.Thread(target=replay_operations)
-    replay_thread.start()
+    def choose_file(self):
+        fn = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")], initialdir=self.log_dir)
+        if fn:
+            self.current_file = fn
+            self.file_label.config(text=os.path.basename(fn))
+            self.display.delete(1.0, "end")
 
-def toggle_yuna_feature():
-    global yuna_feature_enabled
-    yuna_feature_enabled = not yuna_feature_enabled
-    update_action(f"Yuna 特色 {'開啟' if yuna_feature_enabled else '關閉'}")
+    def toggle_pause_playback(self):
+        self.paused_playback = not self.paused_playback
+        self.pause_btn.config(text="繼續回放 (F11)" if self.paused_playback else "暫停回放 (F11)")
 
-def on_close():
-    sys.exit()
+    def _update_display(self, action: Dict):
+        try:
+            self.display.insert("end", f"{action}\n")
+            self.display.see("end")
+        except:
+            pass
 
-# UI 配置
-def setup_ui():
-    global action_text_widget, start_button, stop_button, playback_speed_entry, replay_count_entry, current_file_label
-    root = Tk()
-    root.title("Yuna 滑鼠鍵盤錄製工具")
-    root.geometry("700x500")
-    
-    # UI 配色 (參考 SRunes 及 Yuna 風格)
-    root.configure(bg="#3E4A89")
-    
-    # 設定關閉事件
-    root.protocol("WM_DELETE_WINDOW", on_close)
+    def _msg(self, msg: str):
+        try:
+            self.display.insert("end", f"{msg}\n")
+            self.display.see("end")
+        except:
+            pass
 
-    # 標題區
-    title_frame = Frame(root, bg="#3E4A89")
-    title_frame.pack(pady=10)
-    Label(title_frame, text="Yuna 滑鼠鍵盤錄製工具", font=("Arial", 16), fg="white", bg="#3E4A89").pack()
+    def run(self):
+        try:
+            self.root.mainloop()
+        except Exception as e:
+            print(f"運行錯誤: {e}")
+            self.cleanup()
 
-    # 控制區
-    control_frame = Frame(root, bg="#3E4A89")
-    control_frame.pack(pady=10)
-
-    start_button = Button(control_frame, text="開始錄製 (F9)", command=start_recording, bg="#FF6F61", fg="white")
-    start_button.pack(side="left", padx=5)
-
-    stop_button = Button(control_frame, text="停止錄製 (F10)", command=stop_recording, bg="#FF6F61", fg="white", state="disabled")
-    stop_button.pack(side="left", padx=5)
-
-    replay_button = Button(control_frame, text="回放 (F8)", command=start_replaying, bg="#55B6A2", fg="white")
-    replay_button.pack(side="left", padx=5)
-
-    replay_count_label = Label(control_frame, text="回放次數:", bg="#3E4A89", fg="white")
-    replay_count_label.pack(side="left", padx=5)
-    
-    replay_count_entry = Entry(control_frame, width=6, font=("Arial", 12), justify="center")
-    replay_count_entry.insert(0, "0")
-    replay_count_entry.config(state="readonly")
-    replay_count_entry.pack(side="left", padx=5)
-
-    load_button = Button(control_frame, text="讀取檔案", command=load_operations, bg="#9B59B6", fg="white")
-    load_button.pack(side="left", padx=5)
-
-    current_file_label = Label(control_frame, text="當前檔案: 無", bg="#3E4A89", fg="white")
-    current_file_label.pack(side="left", padx=5)
-
-    speed_label = Label(root, text="回放速度 (0-500):", bg="#3E4A89", fg="white")
-    speed_label.pack(pady=5)
-
-    playback_speed_entry = Entry(root, width=6, font=("Arial", 12), justify="center")
-    playback_speed_entry.insert(0, "100")
-    playback_speed_entry.pack(pady=5)
-    playback_speed_entry.bind("<Return>", lambda event: update_playback_delay(playback_speed_entry.get()))
-
-    # 動作顯示區
-    action_frame = Frame(root, bg="#3E4A89")
-    action_frame.pack(pady=10, fill="both", expand=True)
-    action_text_widget = Text(action_frame, height=6, wrap="word", font=("Arial", 12), bg="#2E3B5E", fg="white", bd=0, padx=10, pady=10)
-    action_text_widget.pack(fill="both", expand=True)
-    scrollbar = Scrollbar(action_text_widget)
-    scrollbar.pack(side="right", fill="y")
-    action_text_widget.config(yscrollcommand=scrollbar.set)
-    scrollbar.config(command=action_text_widget.yview)
-
-    root.mainloop()
+    def cleanup(self):
+        try:
+            if self.mouse_listener and self.mouse_listener.running:
+                self.mouse_listener.stop()
+            kb.unhook_all()
+            for k in ["ctrl", "shift", "alt"]:
+                kb.release(k)
+            self.root.destroy()
+        except:
+            pass
 
 if __name__ == "__main__":
-    setup_ui()
+    try:
+        tool = AutomationScriptTool()
+        tool.run()
+    except Exception as e:
+        print(f"程式錯誤: {e}")
+        input("按 Enter 退出...")
+    finally:
+        try:
+            tool.cleanup()
+        except:
+            pass
