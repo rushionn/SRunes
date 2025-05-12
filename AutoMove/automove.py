@@ -19,7 +19,8 @@ import os
 import shutil
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
-from tkinter import filedialog, Canvas, Frame, Scrollbar
+from tkinter import filedialog, Canvas, Frame, Scrollbar, Toplevel
+import webbrowser
 
 class ScrollableFrame(tb.Frame):  # 可滾動的外框，包覆其他UI元件
     def __init__(self, master, **kwargs):
@@ -80,6 +81,8 @@ class AutoMoveApp:
         self.dest_frame.pack(pady=5, anchor='w', padx=10)
 
         self.update_dynamic_fields()  # 初始化副檔名與目的地欄位
+
+        tb.Button(top_frame, text="詳細", command=self.show_about).pack(side=RIGHT, padx=5)
 
         # ─────────來源資料夾───────
         source_row = tb.Frame(self.container)
@@ -235,6 +238,29 @@ class AutoMoveApp:
     def log(self, message):
         self.log_display.insert('end', message + '\n')
         self.log_display.see('end')
+
+    def show_about(self):
+        about_window = Toplevel(self.root)
+        about_window.title("About")
+        about_window.geometry("500x350")
+        about_window.configure(background='#172B4B')
+
+        description_label = tb.Label(about_window, text="AutoMove將會節省經常分類檔案的時間",  font=('微軟正黑體', 12), justify='left')
+        description_label.pack(pady=10)
+
+        website_label = tb.Label(about_window, text="造訪網站",  cursor="hand2", )
+        website_label.pack(pady=5)
+        website_label.bind("<Button-1>", lambda e: webbrowser.open_new("https://"))
+
+        contact_label = tb.Label(about_window, text="聯絡",  cursor="hand2", )
+        contact_label.pack(pady=5)
+        contact_label.bind("<Button-1>", lambda e: webbrowser.open_new("mailto: "))
+
+        author_label = tb.Label(about_window, text="Creat By Lucien",  font=('微軟正黑體', 12))
+        author_label.pack(pady=10)
+
+        close_button = tb.Button(about_window, text="關閉", command=about_window.destroy)
+        close_button.pack(pady=10)
 
 # ────────────── 主程式入口 ──────────────
 if __name__ == "__main__":
